@@ -2,7 +2,43 @@
 import json
 import re
 import requests
+from threading import Timer, Lock
 from bs4 import BeautifulSoup
+
+INTERVAL = 7200
+TELEGRAM_BOT = ""
+
+
+class Periodic(object):
+    """
+    A periodic task running in threading.Timers
+    """
+
+    def __init__(self, interval, function):
+        self._lock = Lock()
+        self._timer = None
+        self.function = function
+        self.interval = interval
+        self._stopped = True
+        self.start()
+
+    def start(self, from_run=False):
+        self._lock.acquire()
+        if from_run or self._stopped:
+            self._stopped = False
+            self._timer = Timer(self.interval, self._run)
+            self._timer.start()
+        self._lock.release()
+
+    def _run(self):
+        self.start(from_run=True)
+        self.function()
+
+    def stop(self):
+        self._lock.acquire()
+        self._stopped = True
+        self._timer.cancel()
+        self._lock.release()
 
 
 def get_html(url):
@@ -21,7 +57,7 @@ def get_html(url):
 
 
 def get_json(html):
-    soup = BeautifulSoup(html, 'lxml')
+    soup = BeautifulSoup(html, 'html.parser')
     script = soup.find_all('script')
     for content in script:
         if 'window.__APOLLO_STATE__' in str(content):
@@ -41,34 +77,75 @@ def jsonfy(javascript):
         raise err
 
 
-def lambda_handler(event, context):
-
-    # # get weather today
-    gas_api = "https://www.gasbuddy.com/station/125491"
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15'}
-    resp_gas = requests.get(gas_api, headers=headers)
-    print(resp_gas.text)
-
+def prepare_weather_message():
+    # get weather today
     weather_api = "https://weather.gc.ca/api/app/en/Location/MB-38?type=city"
-    resp_weather = requests.get(weather_api, headers=headers)
-    print(resp_weather.text)
+    weather_json = jsonfy(get_html(weather_api))[0]
+    alert = weather_json["alert"]
+    time_stamp = weather_json["observation"]["timeStampText"]
+    temperature = weather_json["observation"]["temperature"]["metric"]
+    pressure = weather_json["observation"]["pressure"]["metric"]
+    visibility = weather_json["observation"]["visibility"]["metric"]
+    wind_direction = weather_json["observation"]["windDirection"]
+    wind_speed = weather_json["observation"]["windSpeed"]["metric"]
+    low_hi = weather_json["dailyFcst"]["regionalNormals"]["metric"]["text"]
+    today_summary = weather_json["dailyFcst"]["daily"][0]["text"]
+    tomorrow_summary = weather_json["dailyFcst"]["daily"][1]["text"]
+    sunset = weather_json["riseSet"]["set"]["time"]
+    sunrise = weather_json["riseSet"]["rise"]["time"]
+    weather_message = ""
+    if str(alert) != "{}":
+        weather_message = weather_message + str(alert)
+    weather_message = "Weather at {} is: {}°C, {}kPa, {}km visibility, wind {} {}km/h  " \
+                      "temperature between {} sunset {} sunrise {}.  \n" \
+                      "Today: {} \nTomorrow: {}".format(time_stamp, temperature, pressure, visibility,
+                                                        wind_direction, wind_speed,
+                                                        low_hi, sunset, sunrise,
+                                                        today_summary, tomorrow_summary)
+    return weather_message
 
-    data = jsonfy(get_json(get_html(gas_api)))["Station:125491"]["prices"]
-    print(data[0]["credit"])
-    print(data[1]["credit"])
 
-    TELEGRAM_BOT = ""
-    # # get
-    base_url = "https://api.telegram.org/bot{}/getUpdates".format(TELEGRAM_BOT)
-    # # send
+def prepare_gas_message():
+    gas_api = "https://www.gasbuddy.com/station/125491"
+    data = jsonfy(get_json(get_html(gas_api)))
+    station_125491 = data["Station:125491"]["prices"]
+    regular_gas = (station_125491[0]["credit"]["price"])
+    premium_gas = (station_125491[1]["credit"]["price"])
+    updated_time = (station_125491[1]["credit"]["postedTime"])
+    station_66606 = data["Station:66606"]["prices"]
+    esso_gas = (station_66606[0]["credit"]["price"])
+    gas_message = "costco regular_gas price is {0} " \
+                  "costco premium_gas price is {1} " \
+                  "updated at {2}. " \
+                  "neer by ESSo regular gas price is {3}".format(regular_gas, premium_gas, updated_time, esso_gas)
+    return gas_message
+
+
+def send_telegram(message):
+    # # # get
+    # # base_url = "https://api.telegram.org/bot{}/getUpdates".format(TELEGRAM_BOT)
+    # # # send
+    global TELEGRAM_BOT
     base_url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_BOT)
-    #
-    # parameters = {
-    #     "chat_id": "-1001816097693",
-    #     "text": "haha"
-    # }
-    #
-    # resp = requests.get(base_url, data=parameters)
+    parameters = {
+        "chat_id": "-1001816097693",
+        "text": message
+    }
+    resp = requests.get(base_url, data=parameters)
+    return resp.text
+
+
+def do_jobs():
+    weather_message = prepare_weather_message()
+    print(weather_message)
+    send_telegram(weather_message)
+    gas_message = prepare_gas_message()
+    print(gas_message)
+    send_telegram(gas_message)
+
+
+def lambda_handler(event, context):
+    Periodic(INTERVAL, do_jobs)
 
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
