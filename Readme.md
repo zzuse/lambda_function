@@ -1,7 +1,7 @@
 # AWS Lambda Service For Weather and Gas Price 
 
 ## What 
-query Weather and Gas and send messages to Telegram
+query Weather and Gas and send messages to Telegram per hour
 
 ## Limitation
 This Project only for personal study, using by your own risk. 
